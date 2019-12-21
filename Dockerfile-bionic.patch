@@ -1,0 +1,117 @@
+--- Dockerfile-bwrs	2019-12-20 21:26:16.938545642 -0600
++++ Dockerfile-bionic	2019-12-19 21:25:43.483566424 -0600
+@@ -23,22 +23,44 @@
+ ########################## BUILD IMAGE  ##########################
+ # We need to use the Rust build image, because
+ # we need the Rust compiler and Cargo tooling
+-FROM rust:1.39 as build
++FROM ubuntu:bionic as build
++
++ENV RUSTUP_HOME=/usr/local/rustup \
++    CARGO_HOME=/usr/local/cargo \
++    PATH=/usr/local/cargo/bin:$PATH \
++    RUST_VERSION=1.39.0
++
++RUN apt-get update \
++&& apt-get install -y \
++    pkg-config \
++    libssl-dev \
++    libmariadb-dev \
++    libmariadb-dev-compat \
++    curl
+ 
+ # set sqlite as default for DB ARG for backward comaptibility
+ ARG DB=sqlite
+ 
++RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs -o rustup-init; \
++    chmod +x rustup-init; \
++    ./rustup-init -y --no-modify-path --profile minimal; \
++    rm rustup-init; \
++    chmod -R a+w $RUSTUP_HOME $CARGO_HOME; \
++    rustup --version; \
++    cargo --version; \
++    rustc --version;
++
+ # Don't download rust docs
+-RUN rustup set profile minimal
++#RUN rustup set profile minimal
+ 
+ # Creates a dummy project used to grab dependencies
+ RUN USER=root cargo new --bin app
+ WORKDIR /app
+ 
+ # Copies over *only* your manifests and build files
+-COPY ./Cargo.* ./
+-COPY ./rust-toolchain ./rust-toolchain
+-COPY ./build.rs ./build.rs
++COPY git/Cargo.* ./
++COPY git/rust-toolchain ./rust-toolchain
++COPY git/build.rs ./build.rs
+ 
+ # Builds your dependencies and removes the
+ # dummy project, except the target folder
+@@ -48,7 +70,7 @@
+ 
+ # Copies the complete project
+ # To avoid copying unneeded files, use .dockerignore
+-COPY . .
++COPY git .
+ 
+ # Make sure that we actually build the project
+ RUN touch src/main.rs
+@@ -60,36 +82,27 @@
+ ######################## RUNTIME IMAGE  ########################
+ # Create a new stage with a minimal image
+ # because we already have a binary built
+-FROM debian:buster-slim
++FROM ubuntu:bionic
++
++# Create package directory
++RUN mkdir -p /bitwarden_package/DEBIAN
++RUN mkdir -p /bitwarden_package/usr/local/bin
++RUN mkdir -p /bitwarden_package/usr/lib/systemd/system
++RUN mkdir -p /bitwarden_package/etc/bitwarden_rs
++RUN mkdir -p /bitwarden_package/usr/share/bitwarden_rs
+ 
+-ENV ROCKET_ENV "staging"
+-ENV ROCKET_PORT=80
+-ENV ROCKET_WORKERS=10
+-
+-# Install needed libraries
+-RUN apt-get update && apt-get install -y \
+-    --no-install-recommends \
+-    openssl \
+-    ca-certificates \
+-    curl \
+-    sqlite3 \
+-    && rm -rf /var/lib/apt/lists/*
+-
+-RUN mkdir /data
+-VOLUME /data
+-EXPOSE 80
+-EXPOSE 3012
++WORKDIR /bitwarden_package
+ 
+ # Copies the files from the context (Rocket.toml file and web-vault)
+ # and the binary from the "build" stage to the current stage
+-COPY Rocket.toml .
+-COPY --from=vault /web-vault ./web-vault
+-COPY --from=build app/target/release/bitwarden_rs .
+-
+-COPY docker/healthcheck.sh ./healthcheck.sh
+-
+-HEALTHCHECK --interval=30s --timeout=3s CMD sh healthcheck.sh || exit 1
++COPY debian/control /bitwarden_package/DEBIAN/control
++COPY debian/postinst /bitwarden_package/DEBIAN/postinst
++COPY debian/conffiles /bitwarden_package/DEBIAN/conffiles
++COPY git/Rocket.toml /bitwarden_package/etc/bitwarden_rs
++COPY debian/config.env /bitwarden_package/etc/bitwarden_rs
++COPY debian/bitwarden_rs.service /bitwarden_package/usr/lib/systemd/system
++COPY --from=vault /web-vault /bitwarden_package/usr/share/bitwarden_rs/web-vault
++COPY --from=build app/target/release/bitwarden_rs /bitwarden_package/usr/local/bin
+ 
+-# Configures the startup!
+-WORKDIR /
+-CMD ["/bitwarden_rs"]
++# Create the package
++RUN dpkg-deb --build . bitwarden-rs.deb
